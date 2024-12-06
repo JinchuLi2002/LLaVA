@@ -102,7 +102,7 @@ class RewardFunction:
             f"{DEFAULT_IM_START_TOKEN}{DEFAULT_IMAGE_TOKEN}{DEFAULT_IM_END_TOKEN}\n"
             "You evaluating the angle between the pole (yellow rectangle) is balanced on the cart (black square). "
             "Please look at the given image and respond with a single number representing the degrees"
-            "where 0 means the pole is horizontal to the left, 90 means upright, and 180 means horizontal to the right."
+            "where 0 means the pole is horizontal to the left, 90 means upright, and 180 means horizontal to the right. Also explain."
         )
 
         # Reset conversation
