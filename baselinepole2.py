@@ -6,6 +6,8 @@ import torch.optim as optim
 import torch.nn.functional as F
 import random
 from collections import namedtuple, deque
+import gym
+import time
 
 # Check if GPU is available
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -51,9 +53,9 @@ class ReplayBuffer:
 
     def __len__(self):
         return len(self.memory)
+
 # Define the DQN agent class
 class DQNAgent:
-    # Initialize the DQN agent
     def __init__(self, state_size, action_size, seed, lr):
         self.state_size = state_size
         self.action_size = action_size
@@ -75,8 +77,9 @@ class DQNAgent:
                 experiences = self.memory.sample()
                 self.learn(experiences, gamma=0.99)
 
-    # Choose an action based on the current state
     def act(self, state, eps=0.):
+        if isinstance(state, tuple):  # Handle tuple state
+            state = state[0]
         state_tensor = torch.from_numpy(state).float().unsqueeze(0).to(device)
         
         self.qnetwork_local.eval()
@@ -89,7 +92,6 @@ class DQNAgent:
         else:
             return np.random.randint(self.action_size)
 
-    # Learn from batch of experiences
     def learn(self, experiences, gamma):
         states, actions, rewards, next_states, dones = zip(*experiences)
         states = torch.from_numpy(np.vstack(states)).float().to(device)
@@ -113,15 +115,11 @@ class DQNAgent:
     def soft_update(self, local_model, target_model, tau):
         for target_param, local_param in zip(target_model.parameters(), local_model.parameters()):
             target_param.data.copy_(tau * local_param.data + (1.0 - tau) * target_param.data)
-# Initialize the environment and the agent
-import gym
-from collections import deque
-import random
 
-# Set up the environment
-env = gym.make("CartPole-v1")
+# Set up the environment with render_mode
+env = gym.make("CartPole-v1", render_mode="human")
 
-# Define training parameters
+# Training parameters
 num_episodes = 250
 max_steps_per_episode = 200
 epsilon_start = 1.0
@@ -130,58 +128,45 @@ epsilon_decay_rate = 0.99
 gamma = 0.9
 lr = 0.0025
 buffer_size = 10000
-buffer = deque(maxlen=buffer_size)
 batch_size = 128
 update_frequency = 10
-
 
 # Initialize the DQNAgent
 input_dim = env.observation_space.shape[0]
 output_dim = env.action_space.n
-new_agent = DQNAgent(input_dim, output_dim, seed=170715, lr = lr)
+new_agent = DQNAgent(input_dim, output_dim, seed=170715, lr=lr)
 
 # Training loop
 for episode in range(num_episodes):
-    # Reset the environment and extract the state
     reset_result = env.reset()
     state = reset_result[0] if isinstance(reset_result, tuple) else reset_result
     epsilon = max(epsilon_end, epsilon_start * (epsilon_decay_rate ** episode))
 
-    # Run one episode
     for step in range(max_steps_per_episode):
-        # Choose and perform an action
         action = new_agent.act(state, epsilon)
         step_result = env.step(action)
         next_state = step_result[0] if isinstance(step_result, tuple) else step_result
         reward = step_result[1]
         done = step_result[2]
 
-        buffer.append((state, action, reward, next_state, done))
-        
-        if len(buffer) >= batch_size:
-            batch = random.sample(buffer, batch_size)
-            # Update the agent's knowledge
-            new_agent.learn(batch, gamma)
-        
+        new_agent.step(state, action, reward, next_state, done)
         state = next_state
         
-        # Check if the episode has ended
         if done:
             break
     
     if (episode + 1) % update_frequency == 0:
         print(f"Episode {episode + 1}: Finished training")
 
-# Evaluate the agent's performance
+# Evaluate the agent
 test_episodes = 100
 episode_rewards = []
-
 for episode in range(test_episodes):
     reset_result = env.reset()
     state = reset_result[0] if isinstance(reset_result, tuple) else reset_result
     episode_reward = 0
     done = False
-    
+
     while not done:
         action = new_agent.act(state, eps=0.)
         step_result = env.step(action)
@@ -191,24 +176,10 @@ for episode in range(test_episodes):
 
         episode_reward += reward
         state = next_state
-        
+
     episode_rewards.append(episode_reward)
 
 average_reward = sum(episode_rewards) / test_episodes
 print(f"Average reward over {test_episodes} test episodes: {average_reward:.2f}")
-
-
-# Visualize the agent's performance
-import time
-
-state = env.reset()
-done = False
-
-while not done:
-    env.render()
-    action = new_agent.act(state, eps=0.)
-    next_state, reward, done, _ = env.step(action)
-    state = next_state
-    time.sleep(0.1)  # Add a delay to make the visualization easier to follow
 
 env.close()
