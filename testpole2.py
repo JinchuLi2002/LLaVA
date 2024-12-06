@@ -102,7 +102,7 @@ class RewardFunction:
             f"{DEFAULT_IM_START_TOKEN}{DEFAULT_IMAGE_TOKEN}{DEFAULT_IM_END_TOKEN}\n"
             "You evaluating how well the pole (yellow rectangle) is balanced on the cart (black square). "
             "Please look at the given image and respond with a single floating point number between 0.0 and 1.0, "
-            "where 0.0 means the pole is horizontal and 1.0 means the pole is up-right. Be very strict."
+            "where 0.0 means the pole is horizontal (to either direction) and 1.0 means the pole is up-right. Be very strict and precise."
         )
 
         # Reset conversation
