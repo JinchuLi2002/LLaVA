@@ -100,6 +100,7 @@ class RewardFunction:
         # New prompt that instructs the model to return a number between 0.0 and 1.0
         prompt = (
             f"{DEFAULT_IM_START_TOKEN}{DEFAULT_IMAGE_TOKEN}{DEFAULT_IM_END_TOKEN}\n"
+            "Describe the image."
             "the image is about a pole sitting on a cart. What is the angle between the pole and the cart? "
             # "You evaluating the angle between the pole (yellow rectangle) is balanced on the cart (black square). "
             # "Please look at the given image and respond with a single number representing the degrees"
