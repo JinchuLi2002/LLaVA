@@ -100,9 +100,9 @@ class RewardFunction:
         # New prompt that instructs the model to return a number between 0.0 and 1.0
         prompt = (
             f"{DEFAULT_IM_START_TOKEN}{DEFAULT_IMAGE_TOKEN}{DEFAULT_IM_END_TOKEN}\n"
-            "You are a teacher evaluating how well the pole is balanced. "
+            "You evaluating how well the pole (yellow rectangle) is balanced on the cart (black square). "
             "Please look at the given image and respond with a single floating point number between 0.0 and 1.0, "
-            "where 0.0 means the pole is completely off balance and 1.0 means the pole is perfectly balanced."
+            "where 0.0 means the pole is horizontal and 1.0 means the pole is up-right. Be very strict."
         )
 
         # Reset conversation
