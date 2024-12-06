@@ -288,7 +288,7 @@ def main():
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
-    env.seed(seed)
+    #env.seed(seed)
 
     input_dim = env.observation_space.shape[0]
     output_dim = env.action_space.n
