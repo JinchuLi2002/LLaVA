@@ -2,104 +2,91 @@ import argparse
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 
 import random
 import numpy as np
 import gym
-import gym.spaces as sp
-from tqdm import trange
-from time import sleep
 from collections import namedtuple, deque
-import matplotlib.pyplot as plt
+from PIL import Image
+from time import sleep
 
+# LLaVA imports (as in your original code)
 from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 from llava.conversation import conv_templates, SeparatorStyle
 from llava.model.builder import load_pretrained_model
 from llava.utils import disable_torch_init
 from llava.mm_utils import process_images, tokenizer_image_token, get_model_name_from_path
-
-from PIL import Image
-import requests
-from io import BytesIO
 from transformers import TextStreamer
 
-import os
-import imageio
-from PIL import Image, ImageDraw, ImageFont
-
-# Set device
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+print("Device:", device)
 
-# ===========================
-# RewardFunction Class
-# ===========================
-
+###########################
+# Reward Function (VLM)
+###########################
 class RewardFunction:
-    def __init__(self, args):
+    def __init__(self, model_path, model_base=None, conv_mode=None, load_8bit=False, load_4bit=False, device='cuda'):
         disable_torch_init()
-        self.args = args
-        self.model_name = get_model_name_from_path(args.model_path)
+        self.model_path = model_path
+        self.model_name = get_model_name_from_path(model_path)
         self.tokenizer, self.model, self.image_processor, self.context_len = load_pretrained_model(
-            args.model_path,
-            args.model_base,
+            model_path,
+            model_base,
             self.model_name,
-            args.load_8bit,
-            args.load_4bit,
-            device=args.device
+            load_8bit,
+            load_4bit,
+            device=device
         )
-        
+
         # Determine conversation mode
         if "llama-2" in self.model_name.lower():
-            conv_mode = "llava_llama_2"
+            inferred_conv_mode = "llava_llama_2"
         elif "mistral" in self.model_name.lower():
-            conv_mode = "mistral_instruct"
+            inferred_conv_mode = "mistral_instruct"
         elif "v1.6-34b" in self.model_name.lower():
-            conv_mode = "chatml_direct"
+            inferred_conv_mode = "chatml_direct"
         elif "v1" in self.model_name.lower():
-            conv_mode = "llava_v1"
+            inferred_conv_mode = "llava_v1"
         elif "mpt" in self.model_name.lower():
-            conv_mode = "mpt"
+            inferred_conv_mode = "mpt"
         else:
-            conv_mode = "llava_v0"
+            inferred_conv_mode = "llava_v0"
 
-        if args.conv_mode is not None and conv_mode != args.conv_mode:
-            print('[WARNING] the auto inferred conversation mode is {}, while `--conv-mode` is {}, using {}'.format(
-                conv_mode, args.conv_mode, args.conv_mode))
+        if conv_mode is not None and conv_mode != inferred_conv_mode:
+            print("[WARNING] Manually specified conv_mode differs from inferred. Using specified:", conv_mode)
+            self.conv_mode = conv_mode
         else:
-            args.conv_mode = conv_mode
+            self.conv_mode = inferred_conv_mode
 
-        self.conv = conv_templates[self.args.conv_mode].copy()
+        self.conv = conv_templates[self.conv_mode].copy()
         if "mpt" in self.model_name.lower():
             self.roles = ('user', 'assistant')
         else:
             self.roles = self.conv.roles
 
-        self.image_tensor = None
-        self.image_size = None
-
     def get_reward(self, image):
         """
         Takes a PIL Image, processes it through the llava model,
-        and returns a float reward.
+        and returns a float reward in [0.0, 1.0].
         """
-        self.image_size = image.size
+        image_size = image.size
         image_tensor = process_images([image], self.image_processor, self.model.config)
         if isinstance(image_tensor, list):
             image_tensor = [img.to(self.model.device, dtype=torch.float16) for img in image_tensor]
         else:
             image_tensor = image_tensor.to(self.model.device, dtype=torch.float16)
-        self.image_tensor = image_tensor
 
-        # Prepare prompt with image tokens
-        prompt = 'describe the image'
-        if self.model.config.mm_use_im_start_end:
-            prompt = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + prompt
-        else:
-            prompt = DEFAULT_IMAGE_TOKEN + '\n' + prompt
+        # New prompt that instructs the model to return a number between 0.0 and 1.0
+        prompt = (
+            f"{DEFAULT_IM_START_TOKEN}{DEFAULT_IMAGE_TOKEN}{DEFAULT_IM_END_TOKEN}\n"
+            "You are a teacher evaluating how well the pole is balanced. "
+            "Please look at the given image and respond with a single floating point number between 0.0 and 1.0, "
+            "where 0.0 means the pole is completely off balance and 1.0 means the pole is perfectly balanced."
+        )
 
         # Reset conversation
-        self.conv = conv_templates[self.args.conv_mode].copy()
-
+        self.conv = conv_templates[self.conv_mode].copy()
         self.conv.append_message(self.roles[0], prompt)
         self.conv.append_message(self.roles[1], None)
         full_prompt = self.conv.get_prompt()
@@ -110,17 +97,15 @@ class RewardFunction:
         if input_ids.dim() == 1:
             input_ids = input_ids.unsqueeze(0)
 
-        print(f"Input IDs shape: {input_ids.shape}")  # Debug Statement
-
         stop_str = self.conv.sep if self.conv.sep_style != SeparatorStyle.TWO else self.conv.sep2
         streamer = TextStreamer(self.tokenizer, skip_prompt=True, skip_special_tokens=True)
 
         with torch.inference_mode():
             output_ids = self.model.generate(
                 input_ids,
-                images=self.image_tensor,
-                image_sizes=[self.image_size],
-                do_sample=False,  # deterministic
+                images=image_tensor,
+                image_sizes=[image_size],
+                do_sample=False,
                 max_new_tokens=100,
                 streamer=streamer,
                 use_cache=True
@@ -128,53 +113,45 @@ class RewardFunction:
 
         output_text = self.tokenizer.decode(output_ids[0], skip_special_tokens=True).strip()
         self.conv.messages[-1][-1] = output_text
-        print(output_text)
+
         # Extract float from the output_text
+        # We assume model will produce something like "0.85" or "0.5"
         try:
-            txt = output_text.split()[0]
-            if txt[-4:] == "USER": txt = txt[:-4]
-            # Assuming the model outputs something like "0.85"
+            txt = output_text.strip().split()[0]
+            if txt[-4:] == "USER":
+                txt = txt[:-4]
             reward = float(txt)
             reward = max(0.0, min(1.0, reward))  # Clamp between 0 and 1
         except:
-            # If parsing fails, assign a default small reward
             reward = 0.0
             print(f"[Warning] Failed to parse reward from model output: '{output_text}'. Assigning reward=0.0")
 
-            print(f"Reward: {reward}")  # Debug Statement
-
         return reward
 
-# ===========================
-# DQN Components
-# ===========================
+###########################
+# DQN Agent and Replay Buffer
+###########################
+class QNetwork(nn.Module):
+    def __init__(self, state_size, action_size, seed, fc1_units=64, fc2_units=64):
+        super(QNetwork, self).__init__()
+        self.seed = torch.manual_seed(seed)
+        self.fc1 = nn.Linear(state_size, fc1_units)
+        self.fc2 = nn.Linear(fc1_units, fc2_units)
+        self.fc3 = nn.Linear(fc2_units, action_size)
+        self.to(device)
 
-# Policy Network
-class QNet(nn.Module):
-    def __init__(self, n_states, n_actions, n_hidden=64):
-        super(QNet, self).__init__()
+    def forward(self, state):
+        x = F.relu(self.fc1(state))
+        x = F.relu(self.fc2(x))
+        return self.fc3(x)
 
-        self.fc = nn.Sequential(
-            nn.Linear(n_states, n_hidden),
-            nn.ReLU(),
-            nn.Linear(n_hidden, n_hidden),
-            nn.ReLU(),
-            nn.Linear(n_hidden, n_actions)
-            )
-
-    def forward(self, x):
-        return self.fc(x)
-
-# Replay Buffer
-class ReplayBuffer():
-    def __init__(self, n_actions, memory_size, batch_size):
-        self.n_actions = n_actions
+class ReplayBuffer:
+    def __init__(self, action_size, buffer_size, batch_size, seed):
+        self.action_size = action_size
+        self.memory = deque(maxlen=buffer_size)
         self.batch_size = batch_size
-        self.memory = deque(maxlen = memory_size)
         self.experience = namedtuple("Experience", field_names=["state", "action", "reward", "next_state", "done"])
-
-    def __len__(self):
-        return len(self.memory)
+        self.seed = random.seed(seed)
 
     def add(self, state, action, reward, next_state, done):
         e = self.experience(state, action, reward, next_state, done)
@@ -191,322 +168,153 @@ class ReplayBuffer():
 
         return (states, actions, rewards, next_states, dones)
 
-# DQN Agent
-class DQN():
-    def __init__(self, n_states, n_actions, reward_fn, batch_size=64, lr=1e-4, gamma=0.99, mem_size=int(1e5), learn_step=5, tau=1e-3):
-        self.n_states = n_states
-        self.n_actions = n_actions
-        self.batch_size = batch_size
-        self.gamma = gamma
-        self.learn_step = learn_step
-        self.tau = tau
-        self.reward_fn = reward_fn
+    def __len__(self):
+        return len(self.memory)
 
-        # model
-        self.net_eval = QNet(n_states, n_actions).to(device)
-        self.net_target = QNet(n_states, n_actions).to(device)
-        self.optimizer = optim.Adam(self.net_eval.parameters(), lr=lr)
-        self.criterion = nn.MSELoss()
+class DQNAgent:
+    def __init__(self, state_size, action_size, seed, lr=0.0025):
+        self.state_size = state_size
+        self.action_size = action_size
+        self.seed = random.seed(seed)
 
-        # Initialize target network
-        self.net_target.load_state_dict(self.net_eval.state_dict())
+        self.qnetwork_local = QNetwork(state_size, action_size, seed).to(device)
+        self.qnetwork_target = QNetwork(state_size, action_size, seed).to(device)
+        self.optimizer = optim.Adam(self.qnetwork_local.parameters(), lr)
 
-        # memory
-        self.memory = ReplayBuffer(n_actions, mem_size, batch_size)
-        self.counter = 0    # update cycle counter
+        self.memory = ReplayBuffer(action_size, buffer_size=int(1e5), batch_size=64, seed=seed)
+        self.t_step = 0
 
-    def getAction(self, state, epsilon):
-        state = torch.from_numpy(state).float().unsqueeze(0).to(device)
-
-        self.net_eval.eval()
-        with torch.no_grad():
-            action_values = self.net_eval(state)
-        self.net_eval.train()
-
-        # epsilon-greedy
-        if random.random() < epsilon:
-            action = random.choice(np.arange(self.n_actions))
-        else:
-            action = np.argmax(action_values.cpu().data.numpy())
-
-        return action
-
-    def save2memory(self, state, action, reward, next_state, done):
+    def step(self, state, action, reward, next_state, done):
         self.memory.add(state, action, reward, next_state, done)
-
-        self.counter += 1
-        if self.counter % self.learn_step == 0:
-            if len(self.memory) >= self.batch_size:
+        self.t_step = (self.t_step + 1) % 4
+        if self.t_step == 0:
+            if len(self.memory) > 64:
                 experiences = self.memory.sample()
-                self.learn(experiences)
+                self.learn(experiences, gamma=0.99)
 
-    def learn(self, experiences):
+    def act(self, state, eps=0.):
+        state_tensor = torch.from_numpy(state).float().unsqueeze(0).to(device)
+        self.qnetwork_local.eval()
+        with torch.no_grad():
+            action_values = self.qnetwork_local(state_tensor)
+        self.qnetwork_local.train()
+
+        if np.random.random() > eps:
+            return action_values.argmax(dim=1).item()
+        else:
+            return np.random.randint(self.action_size)
+
+    def learn(self, experiences, gamma):
         states, actions, rewards, next_states, dones = experiences
 
-        q_target = self.net_target(next_states).detach().max(axis=1)[0].unsqueeze(1)
-        y_j = rewards + self.gamma * q_target * (1 - dones)          # target
-        q_eval = self.net_eval(states).gather(1, actions)
+        # Double DQN or simple DQN approach:
+        Q_targets_next = self.qnetwork_target(next_states).detach().max(1)[0].unsqueeze(1)
+        Q_targets = rewards + (gamma * Q_targets_next * (1 - dones))
 
-        # loss backprop
-        loss = self.criterion(q_eval, y_j)
+        Q_expected = self.qnetwork_local(states).gather(1, actions)
+
+        loss = F.mse_loss(Q_expected, Q_targets)
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
 
-        # soft update target network
-        self.softUpdate()
+        self.soft_update(self.qnetwork_local, self.qnetwork_target, tau=1e-3)
 
-    def softUpdate(self):
-        for eval_param, target_param in zip(self.net_eval.parameters(), self.net_target.parameters()):
-            target_param.data.copy_(self.tau*eval_param.data + (1.0-self.tau)*target_param.data)
+    def soft_update(self, local_model, target_model, tau):
+        for target_param, local_param in zip(target_model.parameters(), local_model.parameters()):
+            target_param.data.copy_(tau * local_param.data + (1.0 - tau)*target_param.data)
 
-# ===========================
-# Training and Testing Functions
-# ===========================
 
-def train(env, agent, reward_fn, n_episodes=500, max_steps=200, eps_start=1.0, eps_end=0.05, eps_decay=0.995, target=180, chkpt=False):
-    score_hist = []
-    epsilon = eps_start
+###########################
+# Main Training Code
+###########################
 
-    bar_format = '{l_bar}{bar:10}| {n:4}/{total_fmt} [{elapsed:>7}<{remaining:>7}, {rate_fmt}{postfix}]'
-    pbar = trange(n_episodes, unit="ep", bar_format=bar_format, ascii=True)
-    for idx_epi in pbar:
-        reset_result = env.reset()
-        if isinstance(reset_result, tuple) or isinstance(reset_result, list):
-            state, _ = reset_result
+# We will load the model once and use it throughout
+# Adjust model_path as needed
+model_path = "liuhaotian/llava-v1.5-7b"  # Example model path
+reward_fn = RewardFunction(model_path=model_path, model_base=None, conv_mode=None, load_8bit=False, load_4bit=False, device=device)
+
+# Set up the CartPole environment
+env = gym.make("CartPole-v1", render_mode='rgb_array')
+
+# Training parameters
+num_episodes = 250
+max_steps_per_episode = 50  # Reduced to limit calls to the VLM
+epsilon_start = 1.0
+epsilon_end = 0.2
+epsilon_decay_rate = 0.99
+gamma = 0.9
+lr = 0.0025
+update_frequency = 10
+seed = 170715
+
+input_dim = env.observation_space.shape[0]
+output_dim = env.action_space.n
+
+agent = DQNAgent(input_dim, output_dim, seed=seed, lr=lr)
+
+# Training loop
+for episode in range(num_episodes):
+    reset_result = env.reset()
+    state = reset_result[0] if isinstance(reset_result, tuple) else reset_result
+    epsilon = max(epsilon_end, epsilon_start * (epsilon_decay_rate ** episode))
+
+    for step in range(max_steps_per_episode):
+        action = agent.act(state, epsilon)
+        step_result = env.step(action)
+        # Extract step result
+        if len(step_result) == 5:
+            next_state, _, done, truncated, info = step_result
+            done = done or truncated
+        elif len(step_result) == 4:
+            next_state, _, done, info = step_result
         else:
-            state = reset_result
+            raise ValueError("Unexpected step result format from env.step().")
 
-        score = 0
-        for idx_step in range(max_steps):
-            action = agent.getAction(state, epsilon)
-            step_result = env.step(action)
-            
-            # Handle different Gym versions
-            if len(step_result) == 4:
-                next_state, _, done, _ = step_result
-            elif len(step_result) == 5:
-                next_state, _, done, truncated, _ = step_result
-                done = done or truncated
-            else:
-                raise ValueError("Unexpected number of return values from env.step()")
+        # Get the rendered image and compute reward using VLM
+        frame = env.render()
+        pil_image = Image.fromarray(frame).convert('RGB')
+        vlm_reward = reward_fn.get_reward(pil_image)
 
-            # Get rendered image
-            image = env.render()
-            pil_image = Image.fromarray(image).convert('RGB')
+        agent.step(state, action, vlm_reward, next_state, done)
+        state = next_state
+        if done:
+            break
 
-            # Get reward from the RewardFunction
-            reward = reward_fn.get_reward(pil_image)
-            agent.save2memory(state, action, reward, next_state, done)
-            state = next_state
-            score += reward
+    if (episode + 1) % update_frequency == 0:
+        print(f"Episode {episode + 1}: Training in progress...")
 
-            if done:
-                break
+# Evaluate the trained agent
+test_episodes = 10
+episode_rewards = []
 
-        score_hist.append(score)
-        score_avg = np.mean(score_hist[-100:])
-        epsilon = max(eps_end, epsilon*eps_decay)
+for episode in range(test_episodes):
+    reset_result = env.reset()
+    state = reset_result[0] if isinstance(reset_result, tuple) else reset_result
+    episode_reward = 0
+    done = False
+    for step in range(max_steps_per_episode):
+        action = agent.act(state, eps=0.)
+        step_result = env.step(action)
 
-        pbar.set_postfix_str(f"Score: {score: 7.2f}, 100 score avg: {score_avg: 7.2f}")
-        pbar.update(0)
-
-        # Early stop
-        if len(score_hist) >= 100:
-            if score_avg >= target:
-                pbar.close()
-                print("\nTarget Reached!")
-                break
-
-    else:
-        print("\nDone!")
-
-    if chkpt:
-        torch.save(agent.net_eval.state_dict(), 'checkpoint.pth')
-
-    return score_hist
-
-def testAgent(env, agent, reward_fn, loop=3):
-    for i in range(loop):
-        reset_result = env.reset()
-        if isinstance(reset_result, tuple) or isinstance(reset_result, list):
-            state, _ = reset_result
+        if len(step_result) == 5:
+            next_state, _, done, truncated, info = step_result
+            done = done or truncated
+        elif len(step_result) == 4:
+            next_state, _, done, info = step_result
         else:
-            state = reset_result
+            raise ValueError("Unexpected step result format from env.step().")
 
-        score = 0
-        for idx_step in range(200):
-            action = agent.getAction(state, epsilon=0)
-            env.render()
-            # Get rendered image
-            image = env.render()
-            pil_image = Image.fromarray(image).convert('RGB')
+        frame = env.render()
+        pil_image = Image.fromarray(frame).convert('RGB')
+        vlm_reward = reward_fn.get_reward(pil_image)
+        episode_reward += vlm_reward
+        state = next_state
+        if done:
+            break
+    episode_rewards.append(episode_reward)
 
-            # Get reward from the RewardFunction
-            reward = reward_fn.get_reward(pil_image)
-            step_result = env.step(action)
+average_reward = np.mean(episode_rewards)
+print(f"Average VLM-based reward over {test_episodes} test episodes: {average_reward:.2f}")
 
-            if len(step_result) == 4:
-                state, _, done, _ = step_result
-            elif len(step_result) == 5:
-                state, _, done, truncated, _ = step_result
-                done = done or truncated
-            else:
-                raise ValueError("Unexpected number of return values from env.step()")
-
-            score += reward
-            if done:
-                print(f"Test Episode {i+1}: Score = {score:.2f}")
-                break
-    env.close()
-
-def plotScore(scores):
-    plt.figure()
-    plt.plot(scores)
-    plt.title("Score History")
-    plt.xlabel("Episodes")
-    plt.ylabel("Score")
-    plt.show()
-
-# Functions to save GIFs
-def TextOnImg(img, score):
-    img = Image.fromarray(img)
-    try:
-        font = ImageFont.truetype('/Library/Fonts/Arial.ttf', 18)
-    except:
-        font = ImageFont.load_default()
-    draw = ImageDraw.Draw(img)
-    draw.text((20, 20), f"Score={score: .2f}", font=font, fill=(255, 255, 255))
-
-    return np.array(img)
-
-def save_frames_as_gif(frames, filename, path="gifs/"):
-    if not os.path.exists(path):
-        os.makedirs(path)
-        
-    print("Saving gif...", end="")
-    imageio.mimsave(os.path.join(path, filename + ".gif"), frames, fps=60)
-    print("Done!")
-
-def gym2gif(env, agent, reward_fn, filename="gym_animation", loop=3):
-    frames = []
-    for i in range(loop):
-        reset_result = env.reset()
-        if isinstance(reset_result, tuple) or isinstance(reset_result, list):
-            state, _ = reset_result
-        else:
-            state = reset_result
-
-        score = 0
-        for idx_step in range(200):
-            frame = env.render()
-            frames.append(TextOnImg(frame, score))
-            action = agent.getAction(state, epsilon=0)
-            # Get rendered image
-            pil_image = Image.fromarray(frame).convert('RGB')
-            # Get reward from the RewardFunction
-            reward = reward_fn.get_reward(pil_image)
-            step_result = env.step(action)
-
-            if len(step_result) == 4:
-                state, _, done, _ = step_result
-            elif len(step_result) == 5:
-                state, _, done, truncated, _ = step_result
-                done = done or truncated
-            else:
-                raise ValueError("Unexpected number of return values from env.step()")
-
-            score += reward
-            if done:
-                break
-    env.close()
-    save_frames_as_gif(frames, filename=filename)
-
-# ===========================
-# Main Function
-# ===========================
-
-def main(args):
-    # Confirm HF_HOME
-    print(f"HF_HOME is set to: {os.getenv('HF_HOME')}")
-
-    # Initialize environment with render_mode='rgb_array'
-    env = gym.make('CartPole-v1', render_mode='rgb_array')
-    num_states = env.observation_space.shape[0]
-    num_actions = env.action_space.n
-
-    # Initialize RewardFunction
-    reward_fn = RewardFunction(args)
-
-    # Initialize DQN agent
-    agent = DQN(
-        n_states = num_states,
-        n_actions = num_actions,
-        reward_fn = reward_fn,
-        batch_size = args.batch_size,
-        lr = args.lr,
-        gamma = args.gamma,
-        mem_size = args.memory_size,
-        learn_step = args.learn_step,
-        tau = args.tau,
-        )
-
-    # Train the agent
-    score_hist = train(
-        env, 
-        agent, 
-        reward_fn, 
-        n_episodes=args.episodes, 
-        max_steps=200,
-        target=args.target_score, 
-        chkpt=args.save_chkpt
-        )
-
-    # Plot the scores
-    plotScore(score_hist)
-
-    # Test the agent
-    testAgent(env, agent, reward_fn, loop=args.test_loop)
-
-    # Save GIF if needed
-    if args.save_gif:
-        gym2gif(env, agent, reward_fn, filename=args.gif_filename, loop=args.gif_loop)
-
-    if str(device) == "cuda":
-        torch.cuda.empty_cache()
-
-# ===========================
-# Argument Parser
-# ===========================
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="DQN with LLaVA-based Reward Function for CartPole-v1")
-    
-    # LLaVA Model Arguments
-    parser.add_argument("--model-path", type=str, default="liuhaotian/llava-v1.5-7b", help="Path to the pretrained LLaVA model")
-    parser.add_argument("--model-base", type=str, default=None, help="Base model name if different from model path")
-    parser.add_argument("--conv-mode", type=str, default=None, help="Conversation mode for LLaVA")
-    parser.add_argument("--load-8bit", action="store_true", help="Load model in 8-bit precision")
-    parser.add_argument("--load-4bit", action="store_true", help="Load model in 4-bit precision")
-    parser.add_argument("--device", type=str, default="cuda", help="Device to load the model on")
-    parser.add_argument("--debug", action="store_true", help="Enable debug mode for LLaVA")
-
-    # DQN Training Arguments
-    parser.add_argument("--batch_size", type=int, default=64, help="Batch size for DQN")
-    parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate for DQN optimizer")
-    parser.add_argument("--episodes", type=int, default=500, help="Number of training episodes")
-    parser.add_argument("--target_score", type=float, default=180.0, help="Target average score for early stopping")
-    parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor for DQN")
-    parser.add_argument("--memory_size", type=int, default=5000, help="Replay memory size")
-    parser.add_argument("--learn_step", type=int, default=5, help="Frequency of learning steps")
-    parser.add_argument("--tau", type=float, default=1e-3, help="Soft update parameter for target network")
-    parser.add_argument("--save_chkpt", action="store_true", help="Save model checkpoint")
-    
-    # Testing and GIF Arguments
-    parser.add_argument("--test_loop", type=int, default=3, help="Number of test episodes")
-    parser.add_argument("--save_gif", action="store_true", help="Save test episodes as GIF")
-    parser.add_argument("--gif_filename", type=str, default="gym_animation", help="Filename for the saved GIF")
-    parser.add_argument("--gif_loop", type=int, default=3, help="Number of loops for GIF creation")
-
-    args = parser.parse_args()
-    main(args)
+env.close()
