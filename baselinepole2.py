@@ -142,16 +142,20 @@ new_agent = DQNAgent(input_dim, output_dim, seed=170715, lr = lr)
 
 # Training loop
 for episode in range(num_episodes):
-    # Reset the environment
-    state = env.reset()
+    # Reset the environment and extract the state
+    reset_result = env.reset()
+    state = reset_result[0] if isinstance(reset_result, tuple) else reset_result
     epsilon = max(epsilon_end, epsilon_start * (epsilon_decay_rate ** episode))
 
     # Run one episode
     for step in range(max_steps_per_episode):
         # Choose and perform an action
         action = new_agent.act(state, epsilon)
-        next_state, reward, done, _ = env.step(action)
-        
+        step_result = env.step(action)
+        next_state = step_result[0] if isinstance(step_result, tuple) else step_result
+        reward = step_result[1]
+        done = step_result[2]
+
         buffer.append((state, action, reward, next_state, done))
         
         if len(buffer) >= batch_size:
@@ -173,13 +177,18 @@ test_episodes = 100
 episode_rewards = []
 
 for episode in range(test_episodes):
-    state = env.reset()
+    reset_result = env.reset()
+    state = reset_result[0] if isinstance(reset_result, tuple) else reset_result
     episode_reward = 0
     done = False
     
     while not done:
         action = new_agent.act(state, eps=0.)
-        next_state, reward, done, _ = env.step(action)
+        step_result = env.step(action)
+        next_state = step_result[0] if isinstance(step_result, tuple) else step_result
+        reward = step_result[1]
+        done = step_result[2]
+
         episode_reward += reward
         state = next_state
         
@@ -187,6 +196,7 @@ for episode in range(test_episodes):
 
 average_reward = sum(episode_rewards) / test_episodes
 print(f"Average reward over {test_episodes} test episodes: {average_reward:.2f}")
+
 
 # Visualize the agent's performance
 import time
