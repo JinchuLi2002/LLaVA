@@ -101,7 +101,7 @@ class RewardFunction:
         prompt = (
             f"{DEFAULT_IM_START_TOKEN}{DEFAULT_IMAGE_TOKEN}{DEFAULT_IM_END_TOKEN}\n"
             #"Describe the image."
-            "the image is about a pole sitting on a cart. What is the angle between the pole and the cart? Output the number only, be very strict and precise."
+            "the image is about a pole sitting on a cart. Is the pole leaning left or right? Also output the degree that it's leaning."
             # "You evaluating the angle between the pole (yellow rectangle) is balanced on the cart (black square). "
             # "Please look at the given image and respond with a single number representing the degrees"
             # "where 0 means the pole is horizontal to the left, 90 means upright, and 180 means horizontal to the right. Also explain."
