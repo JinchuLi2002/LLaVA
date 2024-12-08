@@ -12,7 +12,6 @@ from PIL import Image
 from time import sleep
 import os
 
-# LLaVA imports (as in your original code)
 from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 from llava.conversation import conv_templates, SeparatorStyle
 from llava.model.builder import load_pretrained_model
@@ -97,14 +96,11 @@ class RewardFunction:
         else:
             image_tensor = image_tensor.to(self.model.device, dtype=torch.float16)
 
-        # New prompt that instructs the model to return a number between 0.0 and 1.0
+        # We ideally want the VLM to return a reward between 0-1, but in reality even making the model
+        # output the tilt angle directly would not be possible, as demonstrated by the following prompt.
         prompt = (
             f"{DEFAULT_IM_START_TOKEN}{DEFAULT_IMAGE_TOKEN}{DEFAULT_IM_END_TOKEN}\n"
-            #"Describe the image."
-            "the image is about a pole sitting on a cart. Is the pole leaning left or right? Also output the degree that it's leaning. Round the degree to the nearest whole number."
-            # "You evaluating the angle between the pole (yellow rectangle) is balanced on the cart (black square). "
-            # "Please look at the given image and respond with a single number representing the degrees"
-            # "where 0 means the pole is horizontal to the left, 90 means upright, and 180 means horizontal to the right. Also explain."
+            "The image is about a pole sitting on a cart. Is the pole leaning left or right? Also output the degree that it's leaning. Round the degree to the nearest whole number."
         )
 
         # Reset conversation
@@ -253,13 +249,11 @@ class DQNAgent:
 # Main Training Code
 ###########################
 def main():
-    # Configuration Parameters
-    model_path = "liuhaotian/llava-v1.5-7b"  # Example model path; adjust as needed
+    model_path = "liuhaotian/llava-v1.5-7b"  
     save_samples = True
     max_samples = 10
     samples_dir = "samples"
 
-    # Initialize RewardFunction with image saving enabled
     reward_fn = RewardFunction(
         model_path=model_path,
         model_base=None,
@@ -272,21 +266,18 @@ def main():
         samples_dir=samples_dir
     )
 
-    # Set up the CartPole environment with render_mode='rgb_array'
     env = gym.make("CartPole-v1", render_mode='rgb_array')
 
-    # Training parameters
     num_episodes = 250
-    max_steps_per_episode = 50  # Reduced to limit calls to the VLM
+    max_steps_per_episode = 50 
     epsilon_start = 1.0
     epsilon_end = 0.2
     epsilon_decay_rate = 0.99
-    gamma = 0.99  # Increased gamma for better credit assignment
+    gamma = 0.99 
     lr = 0.0025
     update_frequency = 10
     seed = 170715
 
-    # Set seeds for reproducibility
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
@@ -295,15 +286,12 @@ def main():
     input_dim = env.observation_space.shape[0]
     output_dim = env.action_space.n
 
-    # Initialize the DQNAgent
     agent = DQNAgent(state_size=input_dim, action_size=output_dim, seed=seed, lr=lr)
 
-    # Create directory for saving sample images if not already created
     if save_samples:
         os.makedirs(samples_dir, exist_ok=True)
 
     print("Starting Training...\n")
-    # Training loop
     for episode in range(1, num_episodes + 1):
         reset_result = env.reset()
         state = reset_result[0] if isinstance(reset_result, tuple) else reset_result
@@ -322,7 +310,6 @@ def main():
             else:
                 raise ValueError("Unexpected step result format from env.step().")
 
-            # Get the rendered image and compute reward using VLM
             frame = env.render()
             pil_image = Image.fromarray(frame).convert('RGB')
             vlm_reward = reward_fn.get_reward(pil_image, episode, step)
